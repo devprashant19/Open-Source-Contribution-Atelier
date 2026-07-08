@@ -4,6 +4,7 @@ Advanced search engine with relevance scoring and semantic understanding.
 
 import logging
 import re
+import time
 import numpy as np
 from typing import Dict, Any, List, Optional, Tuple
 from django.db.models import Q, F, Value
