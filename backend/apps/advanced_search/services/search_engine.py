@@ -10,6 +10,7 @@ from django.db.models import Q, F, Value
 from django.contrib.postgres.search import SearchQuery, SearchRank, SearchVector
 from django.core.cache import cache
 from django.conf import settings
+from django.utils import timezone
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from apps.advanced_search.models import SearchEmbedding, UserSearchProfile
