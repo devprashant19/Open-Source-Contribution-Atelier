@@ -468,3 +468,144 @@ class MaintainerEvaluationViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return MaintainerEvaluation.objects.filter(user=self.request.user)
 
+
+from .models import CollabSession
+from .serializers import CollabSessionSerializer
+from django.contrib.auth import get_user_model
+
+
+class CollabSessionViewSet(viewsets.ModelViewSet):
+    serializer_class = CollabSessionSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return CollabSession.objects.filter(
+            Q(project__user=self.request.user) | Q(allowed_users=self.request.user)
+        ).distinct()
+
+    @action(detail=True, methods=["post"])
+    def invite_mentor(self, request, pk=None):
+        session = self.get_object()
+        if session.project and session.project.user != request.user:
+            return Response({"error": "Only the project owner can invite mentors."}, status=403)
+        username = request.data.get("username")
+        User = get_user_model()
+        try:
+            mentor = User.objects.get(username=username)
+            session.allowed_users.add(mentor)
+            return Response({"status": "invited", "mentor": username})
+        except User.DoesNotExist:
+            return Response({"error": "Mentor not found"}, status=404)
+
+
+# ============================================================
+# CI/CD PIPELINE SIMULATOR
+# ============================================================
+
+from .models import PipelineExecution, PipelineJob
+from .serializers import PipelineExecutionSerializer
+
+
+class PipelineExecutionViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for the CI/CD Pipeline Simulator.
+    Creating a pipeline will immediately run the simulation and populate all job logs.
+    """
+    serializer_class = PipelineExecutionSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return PipelineExecution.objects.filter(user=self.request.user).prefetch_related("jobs")
+
+    def perform_create(self, serializer):
+        from .services.pipeline_simulator import run_pipeline_simulation
+        pipeline = serializer.save(user=self.request.user)
+
+        # Extract code from the associated project if available
+        code = ""
+        if pipeline.project:
+            first_file = pipeline.project.files.first()
+            if first_file:
+                code = first_file.content
+
+        # Run the simulation synchronously (small jobs are fast enough)
+        run_pipeline_simulation(pipeline, code=code)
+
+
+# ============================================================
+# MERGE CONFLICT ARENA
+# ============================================================
+
+from .models import ConflictScenario, ConflictAttempt
+from .serializers import ConflictScenarioSerializer, ConflictAttemptSerializer
+
+CONFLICT_MARKERS = ("<<<<<<< ", "=======", ">>>>>>> ")
+
+
+class ConflictScenarioViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Read-only ViewSet to serve ConflictScenario data to the frontend.
+    The expected_resolution field is never exposed here.
+    """
+    serializer_class = ConflictScenarioSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    queryset = ConflictScenario.objects.all()
+
+    @action(detail=True, methods=["post"])
+    def resolve_conflict(self, request, pk=None):
+        """
+        Validate a user's conflict resolution submission.
+        Checks for unresolved Git markers and code correctness.
+        """
+        scenario = self.get_object()
+        submitted_code = request.data.get("submitted_code", "")
+
+        # Check for unresolved conflict markers
+        for marker in CONFLICT_MARKERS:
+            if marker in submitted_code:
+                attempt = ConflictAttempt.objects.create(
+                    scenario=scenario,
+                    user=request.user,
+                    submitted_code=submitted_code,
+                    passed=False,
+                    error_message=(
+                        f"Unresolved conflict marker found: '{marker.strip()}'. "
+                        "Please resolve all conflicts before submitting."
+                    ),
+                )
+                return Response(
+                    {
+                        "passed": False,
+                        "error": attempt.error_message,
+                        "attempt_id": attempt.id,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        # Compare against expected resolution (normalized whitespace)
+        submitted_normalized = "\n".join(submitted_code.strip().splitlines())
+        expected_normalized = "\n".join(scenario.expected_resolution.strip().splitlines())
+        passed = submitted_normalized == expected_normalized
+
+        error_message = "" if passed else (
+            "Your resolution doesn't match the expected output. "
+            "Check that you preserved the correct logic from both branches."
+        )
+
+        attempt = ConflictAttempt.objects.create(
+            scenario=scenario,
+            user=request.user,
+            submitted_code=submitted_code,
+            passed=passed,
+            error_message=error_message,
+        )
+
+        return Response(
+            {
+                "passed": passed,
+                "error": error_message,
+                "attempt_id": attempt.id,
+                "hint": scenario.hint if not passed else "",
+            },
+            status=status.HTTP_200_OK,
+        )
